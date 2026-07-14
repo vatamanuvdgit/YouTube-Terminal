@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# yt — cauta pe YouTube din terminal si redai in mpv la calitate maxima
+# Depinde de: yt-dlp (cu deno js-runtime), fzf, mpv
+#
+# Uz:
+#   yt "cautare"        -> cauta, afiseaza lista, alegi cu fzf, redai in mpv
+#   yt -n 10 "cautare"  -> cauta 10 rezultate (default 20)
+#   yt <url>            -> redai direct un link YouTube la calitate maxima
+#
+# Calitate: forteaza cea mai buna rezolutie (bv*+ba/best) citita din
+#           ~/.config/yt-dlp/config -> 4K daca e disponibil, altfel 1080p.
+
+set -euo pipefail
+
+# Asigura ca deno (js-runtime pt yt-dlp) e in PATH
+export PATH="$HOME/.deno/bin:$PATH"
+
+RESULTS=20
+
+# Daca e un URL, redai direct
+if [[ "${1:-}" =~ ^https?:// ]]; then
+    mpv --hwdec=no --ytdl-format="bv*[height<=1080][vcodec~='(avc|h264|hevc|h265)']+ba/best" "$1"
+    exit 0
+fi
+
+# Parsare argumente simple
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n) RESULTS="$2"; shift 2 ;;
+        *) QUERY="$*"; break ;;
+    esac
+done
+
+if [[ -z "${QUERY:-}" ]]; then
+    echo "Uz: yt \"cautare\"   sau   yt <url youtube>"
+    exit 1
+fi
+
+echo "🔎 Caută: $QUERY ($RESULTS rezultate)..." >&2
+
+# Cauta prin yt-dlp si formateaza o lista:  Titlu | Canal | Durata
+MAPFILE=()
+while IFS= read -r line; do
+    MAPFILE+=("$line")
+done < <(yt-dlp "ytsearch${RESULTS}:${QUERY}" \
+    --simulate \
+    --print "%(title)s | %(channel)s | %(duration)s | %(webpage_url)s" 2>/dev/null)
+
+if [[ ${#MAPFILE[@]} -eq 0 ]]; then
+    echo "Nu am găsit nimic (YouTube poate fi temporar indisponibil)." >&2
+    exit 1
+fi
+
+# Afiseaza lista fara URL (ca sa fzf arate curat), dar pastram URL-ul la sfarsit
+CHOICE=$(printf '%s\n' "${MAPFILE[@]}" | sed -E 's/ \| (https?:.*)$//' | fzf \
+    --prompt="Alege video > " \
+    --height=40% \
+    --reverse \
+    --preview 'echo "{}"' \
+    --preview-window=hidden)
+
+[[ -z "$CHOICE" ]] && echo "Anulat." && exit 0
+
+# Extrage URL-ul corespunzator liniei alese
+URL=$(printf '%s\n' "${MAPFILE[@]}" | grep -F "$CHOICE" | grep -oE 'https?://.*' | head -1)
+
+echo "▶ Redare: $CHOICE" >&2
+mpv --hwdec=no --ytdl-format="bv*[height<=1080][vcodec~='(avc|h264|hevc|h265)']+ba/best" "$URL"

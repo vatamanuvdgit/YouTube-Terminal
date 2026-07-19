@@ -3,23 +3,96 @@
 # Depinde de: yt-dlp (cu deno js-runtime), fzf, mpv
 #
 # Uz:
-#   yt "cautare"        -> cauta, afiseaza lista, alegi cu fzf, redai in mpv
+#   yt                  -> deschide istoricul (ultimele 10 clipuri) in fzf, alegi sa reredai
+#   yt "cautare"        -> cauta, afiseaza lista (istoricul sus), alegi cu fzf, redai in mpv
 #   yt -n 10 "cautare"  -> cauta 10 rezultate (default 20)
 #   yt <url>            -> redai direct un link YouTube la calitate maxima
+#   yt --history        -> deschide istoricul in fzf (la fel ca yt fara arg), alegi sa revedei
+#   yt --list           -> afiseaza doar istoricul (text), fara redare
 #
 # Calitate: forteaza cea mai buna rezolutie (bv*+ba/best) citita din
 #           ~/.config/yt-dlp/config -> 4K daca e disponibil, altfel 1080p.
+# Istoric: ~/.cache/yt/history (titlu | url), cele mai noi deasupra.
 
 set -euo pipefail
 
 # Asigura ca deno (js-runtime pt yt-dlp) e in PATH
 export PATH="$HOME/.deno/bin:$PATH"
 
+# Format calitate mpv (o singura definitie, folosita la fiecare redare)
+MPV_FMT='bv*[height<=1080][vcodec~='\''(avc|h264|hevc|h265)'\'']+ba/best'
+
+# --- Istoric --- (fortat in ~/.cache/yt, independent de XDG_CACHE_HOME care poate fi poluat)
+HIST_DIR="$HOME/.cache/yt"
+HIST_FILE="$HIST_DIR/history"
+HIST_KEEP=200   # cat de multe intrari pastram pe disc
+HIST_SHOW=10    # cate afisam in fzf
+
+add_history() {
+    # $1 = "titlu | url"
+    local line="$1"
+    [[ -z "$line" ]] && return 0
+    mkdir -p "$HIST_DIR"
+    local url
+    url=$(printf '%s\n' "$line" | grep -oE 'https?://[^ ]+' | head -1)
+    if [[ -f "$HIST_FILE" && -n "$url" ]]; then
+        # elimina eventuala intrare veche cu acelasi url (ca reclicurile sa urce in top)
+        grep -vF "$url" "$HIST_FILE" > "$HIST_FILE.tmp" || true
+        { printf '%s\n' "$line"; cat "$HIST_FILE.tmp"; } > "$HIST_FILE"
+        rm -f "$HIST_FILE.tmp"
+    else
+        printf '%s\n' "$line" > "$HIST_FILE"
+    fi
+    # pastram doar cele mai noi HIST_KEEP intrari
+    local tmp
+    tmp=$(mktemp)
+    head -n "$HIST_KEEP" "$HIST_FILE" > "$tmp" && mv "$tmp" "$HIST_FILE"
+}
+
+play_url() {
+    # $1 = url,  $2 = eticheta (titlu) pentru afisare + istoric
+    local url="$1" label="$2"
+    add_history "$label | $url"
+    echo "▶ Redare: $label" >&2
+    mpv --hwdec=no --ytdl-format="$MPV_FMT" "$url"
+}
+
+view_history() {
+    # $1 = "replay" (default) sau "list"
+    local mode="${1:-replay}"
+    if [[ ! -s "$HIST_FILE" ]]; then
+        echo "Nu ai istoric încă. Redă un clip cu yt \"căutare\" sau un URL." >&2
+        exit 0
+    fi
+    if [[ "$mode" == "list" ]]; then
+        head -n "$HIST_SHOW" "$HIST_FILE" | sed -E 's/ \| (https?:[^ ]+)$//'
+        exit 0
+    fi
+    local picked="" url="" label=""
+    picked=$(head -n "$HIST_SHOW" "$HIST_FILE" | fzf \
+        --prompt="Istoric (ultimele $HIST_SHOW) > " \
+        --height=40% \
+        --reverse \
+        --preview 'echo "{}"' \
+        --preview-window=hidden) || true
+    [[ -z "$picked" ]] && echo "Anulat." && exit 0
+    url=$(printf '%s\n' "$picked" | grep -oE 'https?://[^ ]+' | head -1) || true
+    label=$(printf '%s\n' "$picked" | sed -E 's/ \| (https?:[^ ]+)$//')
+    [[ -z "$url" ]] && echo "Anulat." >&2 && exit 0
+    play_url "$url" "$label"
+    exit 0
+}
+
 RESULTS=20
+
+# Fara argumente -> istoric
+if [[ $# -eq 0 ]]; then
+    view_history replay
+fi
 
 # Daca e un URL, redai direct
 if [[ "${1:-}" =~ ^https?:// ]]; then
-    mpv --hwdec=no --ytdl-format="bv*[height<=1080][vcodec~='(avc|h264|hevc|h265)']+ba/best" "$1"
+    play_url "$1" "$1"
     exit 0
 fi
 
@@ -27,12 +100,14 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -n) RESULTS="$2"; shift 2 ;;
+        --history|-h) view_history replay; exit 0 ;;
+        --list) view_history list; exit 0 ;;
         *) QUERY="$*"; break ;;
     esac
 done
 
 if [[ -z "${QUERY:-}" ]]; then
-    echo "Uz: yt \"cautare\"   sau   yt <url youtube>"
+    echo "Uz: yt \"cautare\"   sau   yt <url youtube>   (fara arg: istoric)"
     exit 1
 fi
 
@@ -46,23 +121,73 @@ done < <(yt-dlp "ytsearch${RESULTS}:${QUERY}" \
     --simulate \
     --print "%(title)s | %(channel)s | %(duration)s | %(webpage_url)s" 2>/dev/null)
 
-if [[ ${#MAPFILE[@]} -eq 0 ]]; then
+# Construim lista combinata pentru fzf:
+#   prima sectiune = [H] ultimele clipuri vizionate (daca exista istoric)
+#   separator
+#   rezultatele cautarii
+HIST_ENTRIES=()
+if [[ -s "$HIST_FILE" ]]; then
+    while IFS= read -r h; do
+        [[ -z "$h" ]] && continue
+        HIST_ENTRIES+=("$h")
+    done < <(head -n "$HIST_SHOW" "$HIST_FILE")
+fi
+
+LIST=()
+for h in "${HIST_ENTRIES[@]:-}"; do
+    [[ -z "$h" ]] && continue
+    LIST+=("[H] $(printf '%s\n' "$h" | sed -E 's/ \| (https?:[^ ]+)$//')")
+done
+
+for m in "${MAPFILE[@]:-}"; do
+    [[ -z "$m" ]] && continue
+    LIST+=("$(printf '%s\n' "$m" | sed -E 's/ \| (https?:.*)$//')")
+done
+
+if [[ ${#LIST[@]} -eq 0 ]]; then
     echo "Nu am găsit nimic (YouTube poate fi temporar indisponibil)." >&2
     exit 1
 fi
 
-# Afiseaza lista fara URL (ca sa fzf arate curat), dar pastram URL-ul la sfarsit
-CHOICE=$(printf '%s\n' "${MAPFILE[@]}" | sed -E 's/ \| (https?:.*)$//' | fzf \
+# Header fzf = sectiunea de istoric (evitam linia '---' selectabila)
+FHDR=""
+if [[ ${#HIST_ENTRIES[@]} -gt 0 ]]; then
+    FHDR="⏱  Vizionate recent (sus) — alege cu Enter pentru a revedea"
+fi
+
+# Afiseaza lista (fara URL-uri) in fzf; utilizatorul alege ce revizionaza
+CHOICE=$(printf '%s\n' "${LIST[@]}" | fzf \
     --prompt="Alege video > " \
-    --height=40% \
+    --header="$FHDR" \
+    --height=50% \
     --reverse \
     --preview 'echo "{}"' \
-    --preview-window=hidden)
+    --preview-window=hidden) || true
 
 [[ -z "$CHOICE" ]] && echo "Anulat." && exit 0
 
-# Extrage URL-ul corespunzator liniei alese
-URL=$(printf '%s\n' "${MAPFILE[@]}" | grep -F "$CHOICE" | grep -oE 'https?://.*' | head -1)
+# Reconstruim linia completa (cu URL) in functie de ce s-a ales
+URL=""; label=""
+if [[ "$CHOICE" == "[H]"* ]]; then
+    # din istoric: decupam textul dupa "[H] " si cautam in history
+    plain="${CHOICE#"[H] "}"
+    full=$(grep -F "$plain" "$HIST_FILE" | head -1)
+    URL=$(printf '%s\n' "$full" | grep -oE 'https?://[^ ]+' | head -1)
+    label="$plain"
+else
+    # din rezultatele cautarii
+    for m in "${MAPFILE[@]}"; do
+        if [[ "$(printf '%s\n' "$m" | sed -E 's/ \| (https?:.*)$//')" == "$CHOICE" ]]; then
+            URL=$(printf '%s\n' "$m" | grep -oE 'https?://.*' | head -1)
+            label="$CHOICE"
+            break
+        fi
+    done
+fi
 
-echo "▶ Redare: $CHOICE" >&2
-mpv --hwdec=no --ytdl-format="bv*[height<=1080][vcodec~='(avc|h264|hevc|h265)']+ba/best" "$URL"
+if [[ -z "$URL" ]]; then
+    echo "Anulat." >&2
+    exit 0
+fi
+
+play_url "$URL" "$label"

@@ -53,6 +53,9 @@ Config suplimentar recomandat (`~/.config/yt-dlp/config`):
 | `yt "cautare"` | Caută pe YouTube, afișează o listă, alegi cu fzf, redă în mpv |
 | `yt -n 10 "cautare"` | Caută 10 rezultate (implicit 20) |
 | `yt <url>` | Redă direct un link YouTube la calitate maximă |
+| `yt` | Deschide istoricul (ultimele 10 clipuri vizionate) în fzf — alegi cu Enter să-l revezi |
+| `yt --history` | La fel ca `yt` fără argument: istoric interactiv, alegi să revezi |
+| `yt --list` | Afișează doar istoricul (text), fără redare |
 
 ## Scurtături mpv (fără mouse)
 
@@ -76,6 +79,16 @@ Config suplimentar recomandat (`~/.config/yt-dlp/config`):
    (`bv*[height<=1080][vcodec~='(avc|h264|hevc|h265)']+ba/best`) și
    `--hwdec=no` (decode software, fără erori pe Wayland).
 4. Pentru un URL direct: se sare direct la pasul 3.
+
+## Istoric (clipuri vizionate)
+
+- Fiecare clip redat (din căutare, din istoric sau prin URL direct) e salvat
+  automat în `~/.cache/yt/history` (`titlu | url`), cu cele mai noi deasupra.
+- `yt` (fără argumente) sau `yt --history` deschide istoricul în `fzf` — alegi
+  un clip cu Enter și-l revezi imediat. Re-clicuirile pe același clip îl urcă
+  în top (fără duplicate). Pe disc se păstrează ultimele 200 de intrări.
+- La o căutare (`yt "ceva"`), istoricul apare integrat sus în listă (tag `[H]`),
+  cu un header — poți revedea un clip vechi sau alege un rezultat nou, la fel.
 
 ## Note / limitări
 
